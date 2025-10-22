@@ -922,7 +922,6 @@ _CONFIGS = [
         num_train_steps=20_000,
     ),
     # ============================================= Single-Task Lora =============================================
-    # The following configs illustate how to fine-tune on a single-task dataset.
     TrainConfig(
         name="pi0_aloha_lora_fold_shirt",
         model=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
@@ -963,12 +962,11 @@ _CONFIGS = [
         freeze_filter=pi0_config.Pi0Config(
             paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
         ).get_freeze_filter(),
-        # Turn off EMA for LoRA finetuning.
         ema_decay=None,
     ),
     # ============================================= Full Fine-tuning ===============================================
     TrainConfig(
-        name="pi0_aloha_full_fold_shorts",
+        name="pi0_aloha_fold_shorts",
         model=pi0_config.Pi0Config(),
         data=LeRobotAlohaDataConfig(
             repo_id="fold_shorts",
@@ -1007,7 +1005,7 @@ _CONFIGS = [
         num_train_steps=30_000,
     ),
     TrainConfig(
-        name="aloha_fold_clothes",
+        name="pi05_aloha_fold_clothes",
         model=pi0_config.Pi0Config(pi05=True),
         data=LeRobotAlohaDataConfig(
             repo_id="fold_clothes",
@@ -1090,7 +1088,6 @@ _CONFIGS = [
         freeze_filter=pi0_config.Pi0Config(
             paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
         ).get_freeze_filter(),
-        # Turn off EMA for LoRA finetuning.
         ema_decay=None,
     ),
     #
