@@ -13,9 +13,11 @@ import cv2
 from functools import partial
 import sys
 import math
+
+sys.path.append("./packages/openpi-client/src")
 from openpi_client import websocket_client_policy, image_tools
 import tree
-import os                 
+import os
 from datetime import datetime 
 import pickle
 
@@ -164,14 +166,18 @@ def inference_process(args, t, ros_operator, policy):
 
     RENDER_H, RENDER_W = 224, 224
     images = {}
-    
+    name_map = {
+        "left" : "cam_left_wrist",
+        "front": "cam_high",
+        "right": "cam_right_wrist",
+    }
     for cam_idx, cam_name in enumerate(args.camera_color_names):
         img_chw = camera_color[0, cam_idx].astype(np.uint8)
         img_hwc  = rearrange(img_chw, "c h w -> h w c")
         img_hwc  = cv2.cvtColor(img_hwc, cv2.COLOR_BGR2RGB)
         img_hwc  = image_tools.resize_with_pad(img_hwc, RENDER_H, RENDER_W)
         img_chw  = rearrange(img_hwc, "h w c -> c h w")
-        images[cam_name] = img_chw
+        images[name_map[cam_name]] = img_chw
 
     observation = {
         "state" : robot_state[0],   # (14,)
@@ -212,8 +218,6 @@ class RosOperator(Node):
         self.instruction = args.instruction
         self.camera_color_deques = [BlockingDeque() for _ in range(len(args.camera_color_names))]
         self.arm_joint_state_deques = [BlockingDeque() for _ in range(len(args.arm_joint_state_names))]
-
-        self.all_config_exist = False
 
         self.camera_color_history_list = []
         self.arm_joint_state_history_list = []
@@ -258,7 +262,7 @@ class RosOperator(Node):
 
         print("publishing:")
         if self.args.use_arm_joint_state > 1:
-            self.arm_joint_state_ctrl(joint_state0)
+            self.arm_joint_state_ctrl_linear_interpolation(joint_state0, True)
         pre_inference_status = -1
         ctrl_rate = self.create_rate(30)
         all_actions = None
@@ -341,12 +345,39 @@ class RosOperator(Node):
             joint_state_msg.position = [float(v) for v in joint_states[i]]
             self.arm_joint_state_ctrl_publisher[i].publish(joint_state_msg)
 
-    def get_frame(self):
-        rate = self.create_rate(1)
-        while rclpy.ok() and not self.all_config_exist:
-            self.all_config_exist = True
-            rate.sleep()
+    def arm_joint_state_ctrl_linear_interpolation(self, joint_states, calc_step):
+        if self.last_ctrl_arm_joint_state is None:
+            last_ctrl_joint_state = np.concatenate(
+                [np.array(self.arm_joint_state_deques[i].right().position) for i in range(len(self.args.arm_joint_state_names))], axis=0)
+        else:
+            last_ctrl_joint_state = np.concatenate(
+                [np.array(joint_state) for joint_state in self.last_ctrl_arm_joint_state], axis=0)
 
+        ctrl_joint_state = np.concatenate(
+                [np.array(joint_state) for joint_state in joint_states], axis=0)
+        joint_state_diff = ctrl_joint_state - last_ctrl_joint_state
+
+        hz = 500
+        if calc_step:
+            step = int(max([max(abs(joint_state_diff[i*self.args.arm_joint_state_dim: (i+1)*self.args.arm_joint_state_dim-1]) / np.array(self.args.arm_steps_length[:self.args.arm_joint_state_dim-1])) for i in range(len(self.args.arm_joint_state_names))]))
+            step = 1 if step == 0 else step
+        else:
+            step = 10
+        rate = self.create_rate(hz)
+        append_to_history_list_step = 10
+        joint_state_list = np.linspace(last_ctrl_joint_state, ctrl_joint_state, step + 1)
+        for i in range(1, len(joint_state_list)):
+            if self.arm_joint_state_ctrl_thread_return_lock.acquire(False):
+                return
+            ctrl_joint_state = [joint_state_list[i][j * self.args.arm_joint_state_dim: (j + 1) * self.args.arm_joint_state_dim] for j in range(len(self.args.arm_joint_state_names))]
+            self.arm_joint_state_ctrl(ctrl_joint_state)
+            if i % append_to_history_list_step == 0 or i + 1 == len(joint_state_list):
+                self.arm_joint_state_ctrl_history_list.append(ctrl_joint_state)
+            rate.sleep()
+        self.arm_joint_state_ctrl_history_list = self.arm_joint_state_ctrl_history_list[-self.k:]
+        return
+
+    def get_frame(self):
         camera_colors = [self.camera_color_deques[i].right() for i in range(len(self.args.camera_color_names))]
         arm_joint_states = [self.arm_joint_state_deques[i].right() for i in range(len(self.args.arm_joint_state_names))]
         frame_time = min([rclpy.time.Time.from_msg(msg.header.stamp).nanoseconds / 1e9 for msg in
@@ -424,7 +455,6 @@ def get_arguments():
     parser.add_argument('--arm_joint_state_ctrl_topics', action='store', type=str, help='arm_joint_state_ctrl_topics', nargs='+',
                         default=['/joint_left_states', '/joint_right_states'],
                         required=False)
-    parser.add_argument('--gripper_offset', nargs='+', action='store', type=float, help='gripper_offset', default=[0], required=False)
 
     parser.add_argument('--use_camera_color', action='store', type=bool, help='use_camera_color', default=True, required=False)
     parser.add_argument('--use_arm_joint_state', action='store', type=int, help='use_arm_joint_state', default=3, required=False)
