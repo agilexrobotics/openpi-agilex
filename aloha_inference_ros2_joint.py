@@ -380,17 +380,30 @@ class RosOperator(Node):
     def get_frame(self):
         camera_colors = [self.camera_color_deques[i].right() for i in range(len(self.args.camera_color_names))]
         arm_joint_states = [self.arm_joint_state_deques[i].right() for i in range(len(self.args.arm_joint_state_names))]
-        frame_time = min([rclpy.time.Time.from_msg(msg.header.stamp).nanoseconds / 1e9 for msg in
+        frame_time = max([rclpy.time.Time.from_msg(msg.header.stamp).nanoseconds / 1e9 for msg in
                           (camera_colors + arm_joint_states)])
 
         for i in range(len(self.args.camera_color_names)):
-            while rclpy.time.Time.from_msg(self.camera_color_deques[i].left().header.stamp).nanoseconds / 1e9 < frame_time:
-                self.camera_color_deques[i].popleft()
-            camera_colors[i] = self.camera_color_deques[i].popleft()
+            closer_time_diff = math.inf
+            while (self.camera_color_deques[i].size() > 0 and
+                   abs(rclpy.time.Time.from_msg(self.camera_color_deques[i].left().header.stamp).nanoseconds / 1e9 - frame_time) < closer_time_diff):
+                closer_time_diff = abs(rclpy.time.Time.from_msg(self.camera_color_deques[i].left().header.stamp).nanoseconds / 1e9 - frame_time)
+                camera_colors[i] = self.camera_color_deques[i].popleft()
         for i in range(len(self.args.arm_joint_state_names)):
-            while rclpy.time.Time.from_msg(self.arm_joint_state_deques[i].left().header.stamp).nanoseconds / 1e9 < frame_time:
-                self.arm_joint_state_deques[i].popleft()
-            arm_joint_states[i] = self.arm_joint_state_deques[i].popleft()
+            closer_time_diff = math.inf
+            while (self.arm_joint_state_deques[i].size() > 0 and
+                   abs(rclpy.time.Time.from_msg(self.arm_joint_state_deques[i].left().header.stamp).nanoseconds / 1e9 - frame_time) < closer_time_diff):
+                closer_time_diff = abs(rclpy.time.Time.from_msg(self.arm_joint_state_deques[i].left().header.stamp).nanoseconds / 1e9 - frame_time)
+                arm_joint_states[i] = self.arm_joint_state_deques[i].popleft()
+
+        #for i in range(len(self.args.camera_color_names)):
+        #    while rclpy.time.Time.from_msg(self.camera_color_deques[i].left().header.stamp).nanoseconds / 1e9 < frame_time:
+        #        self.camera_color_deques[i].popleft()
+        #    camera_colors[i] = self.camera_color_deques[i].popleft()
+        #for i in range(len(self.args.arm_joint_state_names)):
+        #    while rclpy.time.Time.from_msg(self.arm_joint_state_deques[i].left().header.stamp).nanoseconds / 1e9 < frame_time:
+        #        self.arm_joint_state_deques[i].popleft()
+        #    arm_joint_states[i] = self.arm_joint_state_deques[i].popleft()
 
         if len(self.camera_color_history_list) == 0:
             for i in range(self.args.obs_history_num):
