@@ -1,7 +1,7 @@
 # openpi-agilex
 
 Openpi holds open-source models and packages for robotics, published by the [Physical Intelligence team](https://www.physicalintelligence.company/). This repository contains the AgileX Robotics distribution of openpi, tailored for integration with our hardware. If you need more technical details, please refer to the [original repo](https://github.com/Physical-Intelligence/openpi).
-
+Data collection method reference: https://github.com/agilexrobotics/data_tools
 ## Requirements
 
 To run the models in this repository, you will need an NVIDIA GPU with at least the following specifications. These estimations assume a single GPU, but you can also use multiple GPUs with model parallelism to reduce per-GPU memory requirements by configuring `fsdp_devices` in the training config.
