@@ -56,11 +56,7 @@ We will fine-tune the $\pi_{0.5}$ model on the ALOHA dataset as a running exampl
 
 ### 1. Convert your data to a LeRobot dataset
 
-We provide a minimal example script for converting ALOHA data to a LeRobot dataset in [`examples/aloha_real/convert_aloha_data_to_lerobot.py`](examples/aloha_real/convert_aloha_data_to_lerobot.py). You can easily modify it to convert your own data! You can run the script with:
-
-```bash
-uv run examples/aloha_real/convert_aloha_data_to_lerobot.py --data_dir /path/to/your/aloah/data
-```
+we use https://github.com/agilexrobotics/data_tools.git to collect data. 
 
 ### 2. Defining training configs
 
