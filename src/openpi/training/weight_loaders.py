@@ -100,5 +100,11 @@ def _merge_params(loaded_params: at.Params, params: at.Params, *, missing_regex:
     for k in {k for k in flat_ref if pattern.fullmatch(k)}:
         if k not in result:
             result[k] = flat_ref[k]
+    
+    # Finally, add all remaining missing keys from reference to ensure structure matches.
+    # This is important for new modules like depth_encoder that aren't in the checkpoint.
+    for k in flat_ref:
+        if k not in result:
+            result[k] = flat_ref[k]
 
     return flax.traverse_util.unflatten_dict(result, sep="/")

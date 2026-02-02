@@ -40,7 +40,6 @@ We provide multiple base VLA model checkpoints. These checkpoints have been pre-
 
 | Model        | Use Case    | Description                                                                                                 | Checkpoint Path                                |
 | ------------ | ----------- | ----------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
-| $\pi_0$      | Fine-Tuning | Base [π₀ model](https://www.physicalintelligence.company/blog/pi0) for fine-tuning                | `gs://openpi-assets/checkpoints/pi0_base`      |
 | $\pi_{0.5}$    | Fine-Tuning | Base [π₀.₅ model](https://www.physicalintelligence.company/blog/pi05) for fine-tuning    | `gs://openpi-assets/checkpoints/pi05_base`      |V
 
 By default, checkpoints are automatically downloaded from `gs://openpi-assets` and are cached in `~/.cache/openpi` when needed. You can overwrite the download path by setting the `OPENPI_DATA_HOME` environment variable.
@@ -85,7 +84,7 @@ Based on the `TrainConfig` settings (located in `src/openpi/training/config.py`)
 
 ### Example $\pi_{0.5}$ Model Training Configuration
 
-To adapt a $\pi_0$ configuration for $\pi_{0.5}$ training, make the following modifications. All other configurations remain the same.
+To adapt a configuration for $\pi_{0.5}$ training, make the following modifications. All other configurations remain the same.
 
 * **`model` field:** Set `pi05=True` in the `pi0_config.Pi0config()` call.
 * **`assets` field:** Update the `AssetsConfig()` parameter `assets_dir` to point to the $\pi_{0.5}$ base assets:
@@ -96,18 +95,27 @@ To adapt a $\pi_0$ configuration for $\pi_{0.5}$ training, make the following mo
     ```python
     "gs://openpi-assets/checkpoints/pi05_base/params"
     ```
+* We have built-in data configuration files for dual arm operation, including aloha and pika. For other configurations, you can refer to these for modification. For consistent configuration, it is possible to modify the dataset path and batch size parameters in the config for training and inference.
 
+| config        | inference script                                                                                                 |Description script                                                                                                 |
+| ------------ | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | 
+| pi05_aloha   | scripts/aloha_inference-joint-ros2.py   | cobot_magic, 3 cameras and 2 arms    |
+| pi05_aloha_lora   | scripts/aloha_inference-joint-ros2.py   | cobot_magic, 3 cameras and 2 arms    |
+| pi05_pika_no_header   | scripts/pika_inference-ros2.py   | two pika, without header camera    |
+| pi05_pika_no_header_lora   | scripts/pika_inference-ros2.py   | two pika, without header camera    |
+| pi05_pika_with_header   | scripts/pika_inference-with_header-ros2.py   | two pika, with header camera    |
+| pi05_pika_with_header_lora   | scripts/pika_inference-with_header-ros2.py   | two pika, with header camera    |
 ### 3. Running training
 Before we can run training, we need to compute the normalization statistics for the training data. Run the script below with the name of your training config:
 
 ```bash
-uv run scripts/compute_norm_stats.py --config-name pi05_aloha_fold_clothes
+uv run scripts/compute_norm_stats.py --config-name {your config name}
 ```
 
 Now we can kick off training with the following command (the `--overwrite` flag is used to overwrite existing checkpoints if you rerun fine-tuning with the same config):
 
 ```bash
-XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_aloha_fold_clothes --exp-name=my_experiment --overwrite
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py {your config name} --exp-name={your exp name} --overwrite
 ```
 
 The command will log training progress to the console and save checkpoints to the `checkpoints` directory. You can also monitor training progress on the Weights & Biases dashboard. For maximally using the GPU memory, set `XLA_PYTHON_CLIENT_MEM_FRACTION=0.9` before running training -- this enables JAX to use up to 90% of the GPU memory (vs. the default of 75%).
@@ -125,4 +133,29 @@ uv run scripts/serve_policy.py policy:checkpoint --policy.config=pi05_aloha_fold
 This will spin up a server that listens on port 8000 and waits for observations to be sent to it. We can then run an evaluation script (or robot runtime) that queries the server.
 
 ### 5. Running inference
-If you want to embed a policy server call in your own robot runtime, we have a minimal example of how to do so in the [remote inference docs](docs/remote_inference.md).
+**env**
+```bash
+conda create -n inference python=3.10
+conda activate inference
+cd scripts
+pip install -r requirements.txt
+conda install pinocchio==3.2.0 casadi==3.6.7 -c conda-forge
+pip install lark numpy==2.0.2 empy==3.3.4 meshcat pyyaml piper-sdk opencv-python netifaces catkin_pkg
+```
+
+open your dual piper arms ros-sdk and multi cameras, then
+
+```bash
+python scripts/piper_FK-ros2.py --index _l
+python scripts/piper_FK-ros2.py --index _r
+python scripts/piper_IK-ros2.py --index _l
+python scripts/piper_IK-ros2.py --index _r
+``` 
+then 
+```bash
+python aloha_inference-joint-ros2.py
+# or 
+python pika_inference-ros2.py
+# or 
+python pika_inference-with_header-ros2.py
+``` 

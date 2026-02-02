@@ -4,7 +4,7 @@ import dataclasses
 import enum
 import logging
 import pathlib
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 import augmax
 from flax import nnx
@@ -87,12 +87,40 @@ class Observation(Generic[ArrayT]):
     that should be produced by the data transforms.
     """
 
+    # IMPORTANT: all non-default fields must come before fields with defaults.
+    # Required fields
     # Images, in [-1, 1] float32.
     images: dict[str, at.Float[ArrayT, "*b h w c"]]
     # Image masks, with same keys as images.
     image_masks: dict[str, at.Bool[ArrayT, "*b"]]
     # Low-dimensional robot state.
     state: at.Float[ArrayT, "*b s"]
+
+    # Optional fields (with defaults)
+
+    # Depth images (optional), treated as a separate modality from RGB images.
+    # NOTE: Loosen type checking here to avoid jaxtyping axis constraints;
+    # the depth encoder will validate shapes as needed.
+    depths: dict[str, Any] | None = None
+    # Depth masks, with same keys as depths.
+    depths_masks: dict[str, at.Bool[ArrayT, "*b"]] | None = None
+
+    # Tactile data (optional): raw tactile force data for CNN encoder processing
+    # Shape: [*b, H, W, C] (e.g., [*b, 50, 32, 6] for 50x32 sensor grid with 6D force)
+    # Treated as a separate observation modality (like images), not concatenated to state.
+    # NOTE: We loosen the type here to `dict[str, Any]` to allow non-image resolutions
+    # (e.g., 35x20 grids) without conflicting with the global IMAGE_RESOLUTION (224x224).
+    tactile_force3d: dict[str, Any] | None = None
+    # Tactile masks, with same keys as tactile_force3d
+    tactile_force3d_masks: dict[str, at.Bool[ArrayT, "*b"]] | None = None
+    
+    # Force6D data (optional): 1D 6D force vectors for MLP encoder processing
+    # Shape: [*b, 6] for each force vector
+    # Processed by Force6DEncoder and concatenated to state embedding.
+    # Similarly, we loosen the type to avoid strict jaxtyping constraints here.
+    force6d: dict[str, Any] | None = None
+    # Force6D masks, with same keys as force6d
+    force6d_masks: dict[str, at.Bool[ArrayT, "*b"]] | None = None
 
     # Tokenized prompt.
     tokenized_prompt: at.Int[ArrayT, "*b l"] | None = None
@@ -118,10 +146,44 @@ class Observation(Generic[ArrayT]):
                 data["image"][key] = data["image"][key].astype(np.float32) / 255.0 * 2.0 - 1.0
             elif hasattr(data["image"][key], "dtype") and data["image"][key].dtype == torch.uint8:
                 data["image"][key] = data["image"][key].to(torch.float32).permute(0, 3, 1, 2) / 255.0 * 2.0 - 1.0
+
+        # If depths are provided, apply the same normalization convention as images.
+        # Only normalize uint8 images that haven't been normalized yet (float32 images are assumed
+        # to be already normalized by the Normalize transform in the data pipeline).
+        if "depths" in data and data["depths"] is not None:
+            for key in data["depths"]:
+                depth_img = data["depths"][key]
+                # Check if already normalized (float32 with values in [-1, 1] range)
+                is_normalized = False
+                if depth_img.dtype == np.float32 or (hasattr(depth_img, "dtype") and depth_img.dtype == torch.float32):
+                    # Check if values are in normalized range (approximately [-1, 1])
+                    if isinstance(depth_img, np.ndarray):
+                        min_val, max_val = float(depth_img.min()), float(depth_img.max())
+                    else:  # torch.Tensor
+                        min_val, max_val = float(depth_img.min().item()), float(depth_img.max().item())
+                    # If values are in [-1.5, 1.5] range, assume already normalized
+                    # (using slightly wider range to account for floating point errors)
+                    if -1.5 <= min_val and max_val <= 1.5:
+                        is_normalized = True
+                
+                # Only normalize if not already normalized
+                if not is_normalized:
+                    if depth_img.dtype == np.uint8:
+                        data["depths"][key] = depth_img.astype(np.float32) / 255.0 * 2.0 - 1.0
+                    elif hasattr(depth_img, "dtype") and depth_img.dtype == torch.uint8:
+                        data["depths"][key] = (
+                            depth_img.to(torch.float32).permute(0, 3, 1, 2) / 255.0 * 2.0 - 1.0
+                        )
         return cls(
             images=data["image"],
             image_masks=data["image_mask"],
             state=data["state"],
+            depths=data.get("depths"),
+            depths_masks=data.get("depths_mask"),
+            tactile_force3d=data.get("tactile_force3d"),  # Optional tactile data dict
+            tactile_force3d_masks=data.get("tactile_force3d_mask"),  # Optional tactile masks dict
+            force6d=data.get("force6d"),  # Optional force6d data dict
+            force6d_masks=data.get("force6d_mask"),  # Optional force6d masks dict
             tokenized_prompt=data.get("tokenized_prompt"),
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
             token_ar_mask=data.get("token_ar_mask"),
@@ -133,6 +195,11 @@ class Observation(Generic[ArrayT]):
         result = dataclasses.asdict(self)
         result["image"] = result.pop("images")
         result["image_mask"] = result.pop("image_masks")
+        # Map depths back to dict form if present.
+        if "depths" in result and result["depths"] is not None:
+            result["depths"] = result["depths"]
+        if "depths_masks" in result and result["depths_masks"] is not None:
+            result["depths_mask"] = result.pop("depths_masks")
         return result
 
 
@@ -201,6 +268,12 @@ def preprocess_observation(
         images=out_images,
         image_masks=out_masks,
         state=observation.state,
+        depths=observation.depths,
+        depths_masks=observation.depths_masks,
+        tactile_force3d=observation.tactile_force3d,
+        tactile_force3d_masks=observation.tactile_force3d_masks,
+        force6d=observation.force6d,
+        force6d_masks=observation.force6d_masks,
         tokenized_prompt=observation.tokenized_prompt,
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,
@@ -234,8 +307,38 @@ class BaseModelConfig(abc.ABC):
         """Create a model with the given parameters."""
         model = nnx.eval_shape(self.create, jax.random.key(0))
         graphdef, state = nnx.split(model)
+
+        def _normalize_numeric_block_keys(tree):
+            """Convert digit string keys to int keys throughout the params tree."""
+            try:
+                from flax.core import FrozenDict  # type: ignore
+            except Exception:
+                FrozenDict = ()  # type: ignore
+
+            def _is_mapping(x):
+                return isinstance(x, dict) or (FrozenDict and isinstance(x, FrozenDict))
+
+            def _as_dict(x):
+                return dict(x) if (FrozenDict and isinstance(x, FrozenDict)) else x
+
+            def _convert(obj):
+                if not _is_mapping(obj):
+                    return obj
+                obj_dict = _as_dict(obj)
+                out = {}
+                for k, v in obj_dict.items():
+                    if isinstance(k, str) and k.isdigit():
+                        converted_key = int(k)
+                    else:
+                        converted_key = k
+                    out[converted_key] = _convert(v)
+                return out
+
+            return _convert(tree)
+
         if remove_extra_params:
             params = ocp.transform_utils.intersect_trees(state.to_pure_dict(), params)
+        params = _normalize_numeric_block_keys(params)
         at.check_pytree_equality(expected=state.to_pure_dict(), got=params, check_shapes=True, check_dtypes=False)
         state.replace_by_pure_dict(params)
         return nnx.merge(graphdef, state)
@@ -243,7 +346,7 @@ class BaseModelConfig(abc.ABC):
     def load_pytorch(self, train_config, weight_path: str):
         logger.info(f"train_config: {train_config}")
         model = pi0_pytorch.PI0Pytorch(config=train_config.model)
-        safetensors.torch.load_model(model, weight_path)
+        safetensors.torch.load_model(model, weight_path, strict=False)
         return model
 
     @abc.abstractmethod

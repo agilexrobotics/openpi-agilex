@@ -242,7 +242,7 @@ class LeRobotAlohaDataConfig(DataConfigFactory):
             inputs=[
                 _transforms.RepackTransform(
                     {
-                        "images": {"cam_high": "observation.images.top"},
+                        "images": {"base_0_rgb": "observation.images.top"},
                         "state": "observation.state",
                         "actions": "action",
                     }
@@ -266,6 +266,113 @@ class LeRobotAlohaDataConfig(DataConfigFactory):
                 outputs=[_transforms.AbsoluteActions(delta_action_mask)],
             )
 
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotAlohaPoseDataConfig(DataConfigFactory):
+    # If true, will convert joint dimensions to deltas with respect to the current state before passing to the model.
+    # Gripper dimensions will remain in absolute values.
+    use_delta_joint_actions: bool = True
+    use_pose_state_inputs: bool = False
+    # If provided, will be injected into the input data if the "prompt" key is not present.
+    default_prompt: str | None = None
+    # If true, this will convert the joint and gripper values from the standard Aloha space to
+    # the space used by the pi internal runtime which was used to train the base model. People who
+    # use standard Aloha data should set this to true.
+    adapt_to_pi: bool = False
+
+    # Repack transforms.
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {"base_0_rgb": "observation.images.top"},
+                        "state": "observation.state",
+                        "actions": "action",
+                    }
+                )
+            ]
+        )
+    )
+    # Action keys that will be used to read the action sequence from the dataset.
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        data_transforms = _transforms.Group(
+            inputs=[aloha_policy.AlohaInputs(adapt_to_pi=self.adapt_to_pi)],
+            outputs=[aloha_policy.AlohaOutputs(adapt_to_pi=self.adapt_to_pi)],
+        )
+        if self.use_delta_joint_actions:
+            delta_action_mask = _transforms.make_bool_mask(9, -1, 9, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.PoseDeltaActions(delta_action_mask)],
+                outputs=[_transforms.PoseAbsoluteActions(delta_action_mask)],
+            )
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotPikaPoseDataConfig(DataConfigFactory):
+    # If true, will convert joint dimensions to deltas with respect to the current state before passing to the model.
+    # Gripper dimensions will remain in absolute values.
+    use_delta_joint_actions: bool = True
+    use_pose_state_inputs: bool = False
+    # If provided, will be injected into the input data if the "prompt" key is not present.
+    default_prompt: str | None = None
+    # If true, this will convert the joint and gripper values from the standard Aloha space to
+    # the space used by the pi internal runtime which was used to train the base model. People who
+    # use standard Aloha data should set this to true.
+    adapt_to_pi: bool = False
+
+    # Repack transforms.
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {"base_0_rgb": "observation.images.top"},
+                        "state": "observation.state",
+                        "actions": "action",
+                    }
+                )
+            ]
+        )
+    )
+    # Action keys that will be used to read the action sequence from the dataset.
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        delta_action_mask = _transforms.make_bool_mask(9, -1, 9, -1)
+        data_transforms = _transforms.Group(
+            inputs=[aloha_policy.AlohaInputs(adapt_to_pi=self.adapt_to_pi), _transforms.RelativePoseStateInputs(), _transforms.PoseDeltaActions(delta_action_mask)],
+            outputs=[aloha_policy.AlohaOutputs(adapt_to_pi=self.adapt_to_pi), _transforms.PoseAbsoluteActions(delta_action_mask)],
+        )
+        # if self.use_delta_joint_actions:
+        #     delta_action_mask = _transforms.make_bool_mask(9, -1, 9, -1)
+        #     data_transforms = data_transforms.push(
+        #         inputs=[],
+        #         outputs=[],
+        #     )
         model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
 
         return dataclasses.replace(
@@ -553,7 +660,7 @@ _CONFIGS = [
     # Inference Aloha configs.
     #
     TrainConfig(
-        name="pi0_aloha",
+        name="pi0_aloha_1",
         model=pi0_config.Pi0Config(),
         data=LeRobotAlohaDataConfig(
             assets=AssetsConfig(asset_id="trossen"),
@@ -561,7 +668,7 @@ _CONFIGS = [
         policy_metadata={"reset_pose": [0, -1.5, 1.5, 0, 0, 0]},
     ),
     TrainConfig(
-        name="pi05_aloha",
+        name="pi05_aloha_1",
         model=pi0_config.Pi0Config(pi05=True),
         data=LeRobotAlohaDataConfig(
             assets=AssetsConfig(asset_id="trossen"),
@@ -772,9 +879,9 @@ _CONFIGS = [
                     _transforms.RepackTransform(
                         {
                             "images": {
-                                "cam_high": "observation.images.cam_high",
-                                "cam_left_wrist": "observation.images.cam_left_wrist",
-                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                                "base_0_rgb": "observation.images.cam_high",
+                                "left_wrist_0_rgb": "observation.images.cam_left_wrist",
+                                "right_wrist_0_rgb": "observation.images.cam_right_wrist",
                             },
                             "state": "observation.state",
                             "actions": "action",
@@ -801,9 +908,9 @@ _CONFIGS = [
                     _transforms.RepackTransform(
                         {
                             "images": {
-                                "cam_high": "observation.images.cam_high",
-                                "cam_left_wrist": "observation.images.cam_left_wrist",
-                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                                "base_0_rgb": "observation.images.cam_high",
+                                "left_wrist_0_rgb": "observation.images.cam_left_wrist",
+                                "right_wrist_0_rgb": "observation.images.cam_right_wrist",
                             },
                             "state": "observation.state",
                             "actions": "action",
@@ -815,6 +922,373 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=20_000,
         batch_size=64,
+    ),
+    TrainConfig(
+        name="pi0_aloha",
+        model=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"), #, action_dim=14),
+        data=LeRobotAlohaDataConfig(
+            repo_id="/home/agilex/data/lerobot",
+            assets=AssetsConfig(
+                assets_dir="/home/agilex/data/lerobot",
+                # assets_dir="gs://openpi-assets/checkpoints/pi0_base/assets",
+                # asset_id="trossen",
+            ),
+            default_prompt="null",
+            # base_config=DataConfig(
+            #     local_files_only=True,
+            # ),
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "base_0_rgb": "observation.images.front",
+                                "left_wrist_0_rgb": "observation.images.left",
+                                "right_wrist_0_rgb": "observation.images.right",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=80000,
+        batch_size=16,
+    ),
+    TrainConfig(
+        name="pi0_aloha_lora",
+        model=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"), #, action_dim=14),
+        data=LeRobotAlohaDataConfig(
+            repo_id="/home/agilex/data/lerobot",
+            assets=AssetsConfig(
+                assets_dir="/home/agilex/data/lerobot",
+                # assets_dir="gs://openpi-assets/checkpoints/pi0_base/assets",
+                # asset_id="trossen",
+            ),
+            default_prompt="null",
+            # base_config=DataConfig(
+            #     local_files_only=True,
+            # ),
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "base_0_rgb": "observation.images.front",
+                                "left_wrist_0_rgb": "observation.images.left",
+                                "right_wrist_0_rgb": "observation.images.right",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=80000,
+        batch_size=16,
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,  # Turn off EMA for LoRA finetuning
+    ),
+
+    TrainConfig(
+        name="pi05_aloha",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotAlohaDataConfig(
+            repo_id="/home/agilex/dataset-pika_aloha-joint",
+            assets=AssetsConfig(
+                assets_dir="/home/agilex/dataset-pika_aloha-joint",
+                # assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
+                # asset_id="trossen",
+            ),
+            default_prompt="null",
+            # base_config=DataConfig(
+            #     local_files_only=True,
+            # ),
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "base_0_rgb": "observation.images.front",
+                                "left_wrist_0_rgb": "observation.images.left",
+                                "right_wrist_0_rgb": "observation.images.right",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=80000,
+        batch_size=16,
+    ),
+    TrainConfig(
+        name="pi05_aloha_lora",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotAlohaDataConfig(
+            repo_id="/home/agilex/dataset/lerobot/fold_clothes_mix_lerobot",
+            assets=AssetsConfig(
+                assets_dir="/home/agilex/dataset/lerobot/fold_clothes_mix_lerobot",
+                # assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
+                # asset_id="trossen",
+            ),
+            default_prompt="null",
+            # base_config=DataConfig(
+            #     local_files_only=True,
+            # ),
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "base_0_rgb": "observation.images.front",
+                                "left_wrist_0_rgb": "observation.images.left",
+                                "right_wrist_0_rgb": "observation.images.right",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=80000,
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,  # Turn off EMA for LoRA finetuning
+        batch_size=16,
+    ),
+
+    TrainConfig(
+        name="pi05_aloha_pose",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotAlohaPoseDataConfig(
+            adapt_to_pi=False,
+            repo_id="/home/agilex/dataset/lerobot/pika_aloha-aloha-pose6d/",
+            assets=AssetsConfig(
+                assets_dir="/home/agilex/dataset/lerobot/pika_aloha-aloha-pose6d/",
+                # assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
+                # asset_id="trossen",
+            ),
+            default_prompt="null",
+            # base_config=DataConfig(
+            #     local_files_only=True,
+            # ),
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "base_0_rgb": "observation.images.headerDepthCamera",
+                                "left_wrist_0_rgb": "observation.images.pikaDepthCamera_l",
+                                "right_wrist_0_rgb": "observation.images.pikaDepthCamera_r",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=80000,
+        batch_size=16,
+    ),
+    TrainConfig(
+        name="pi05_aloha_pose_lora",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotAlohaPoseDataConfig(
+            adapt_to_pi=False,
+            repo_id="/home/agilex/dataset/lerobot/pika_aloha-aloha-pose6d/",
+            assets=AssetsConfig(
+                assets_dir="/home/agilex/dataset/lerobot/pika_aloha-aloha-pose6d/",
+                # assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
+                # asset_id="trossen",
+            ),
+            default_prompt="null",
+            # base_config=DataConfig(
+            #     local_files_only=True,
+            # ),
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "base_0_rgb": "observation.images.headerDepthCamera",
+                                "left_wrist_0_rgb": "observation.images.pikaDepthCamera_l",
+                                "right_wrist_0_rgb": "observation.images.pikaDepthCamera_r",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=80000,
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,  # Turn off EMA for LoRA finetuning
+        batch_size=16,
+    ),
+    TrainConfig(
+        name="pi05_pika_no_header",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotPikaPoseDataConfig(
+            adapt_to_pi=False,
+            repo_id="/home/agilex/pika_data-lerobot",
+            assets=AssetsConfig(
+                assets_dir="/home/agilex/pika_data-lerobot",
+                # assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
+                # asset_id="trossen",
+            ),
+            default_prompt="null",
+            # base_config=DataConfig(
+            #     local_files_only=True,
+            # ),
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "left_wrist_0_rgb": "observation.images.pikaDepthCamera_l",
+                                "right_wrist_0_rgb": "observation.images.pikaDepthCamera_r",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=80000,
+        batch_size=16,
+    ),
+    TrainConfig(
+        name="pi05_pika_no_header_lora",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotPikaPoseDataConfig(
+            adapt_to_pi=False,
+            repo_id="/home/agilex/pika_data-lerobot",
+            assets=AssetsConfig(
+                assets_dir="/home/agilex/pika_data-lerobot",
+                # assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
+                # asset_id="trossen",
+            ),
+            default_prompt="null",
+            # base_config=DataConfig(
+            #     local_files_only=True,
+            # ),
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "left_wrist_0_rgb": "observation.images.pikaDepthCamera_l",
+                                "right_wrist_0_rgb": "observation.images.pikaDepthCamera_r",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=80000,
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,  # Turn off EMA for LoRA finetuning
+        batch_size=16,
+    ),
+
+    TrainConfig(
+        name="pi05_pika_with_header",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotPikaPoseDataConfig(
+            adapt_to_pi=False,
+            repo_id="/home/agilex/dataset/lerobot/pika_aloha-pika-pose6d",
+            assets=AssetsConfig(
+                assets_dir="/home/agilex/dataset/lerobot/pika_aloha-pika-pose6d",
+                # assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
+                # asset_id="trossen",
+            ),
+            default_prompt="null",
+            # base_config=DataConfig(
+            #     local_files_only=True,
+            # ),
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "base_0_rgb": "observation.images.headerDepthCamera",
+                                "left_wrist_0_rgb": "observation.images.pikaDepthCamera_l",
+                                "right_wrist_0_rgb": "observation.images.pikaDepthCamera_r",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=80000,
+        batch_size=16,
+    ),
+    TrainConfig(
+        name="pi05_pika_with_header_lora",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotPikaPoseDataConfig(
+            adapt_to_pi=False,
+            repo_id="/home/agilex/dataset/lerobot/pika_aloha-pika-pose6d",
+            assets=AssetsConfig(
+                assets_dir="/home/agilex/dataset/lerobot/pika_aloha-pika-pose6d",
+                # assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
+                # asset_id="trossen",
+            ),
+            default_prompt="null",
+            # base_config=DataConfig(
+            #     local_files_only=True,
+            # ),
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "base_0_rgb": "observation.images.headerDepthCamera",
+                                "left_wrist_0_rgb": "observation.images.pikaDepthCamera_l",
+                                "right_wrist_0_rgb": "observation.images.pikaDepthCamera_r",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=80000,
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,  # Turn off EMA for LoRA finetuning
+        batch_size=16,
     ),
     #
     # Fine-tuning DROID configs.
@@ -920,175 +1394,6 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=20_000,
-    ),
-    # ============================================= Single-Task Lora =============================================
-    TrainConfig(
-        name="pi0_aloha_lora_fold_shirt",
-        model=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
-        data=LeRobotAlohaDataConfig(
-            repo_id="fold_shirt_short",
-            assets=AssetsConfig(
-                assets_dir="s3://openpi-assets/checkpoints/pi0_base/assets",
-                asset_id="trossen",
-            ),
-            default_prompt="fold the red shirt",
-            repack_transforms=_transforms.Group(
-                inputs=[
-                    _transforms.RepackTransform(
-                        {
-                            "images": {
-                                "cam_high": "observation.images.front",
-                                "cam_left_wrist": "observation.images.left",
-                                "cam_right_wrist": "observation.images.right",
-                            },
-                            "state": "observation.state",
-                            "actions": "action",
-                        }
-                    ),
-                    _transforms.NormalizeGripperDims(
-                        gripper_indices=(6, 13),
-                        original_min=0.0,
-                        original_max=0.08,
-                        new_min=0.0,
-                        new_max=1.0,
-                        flip=True,
-                    ),
-                ]
-            ),
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
-        num_workers=8,
-        num_train_steps=30_000,
-        freeze_filter=pi0_config.Pi0Config(
-            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
-        ).get_freeze_filter(),
-        ema_decay=None,
-    ),
-    # ============================================= Full Fine-tuning ===============================================
-    TrainConfig(
-        name="pi0_aloha_fold_shorts",
-        model=pi0_config.Pi0Config(),
-        data=LeRobotAlohaDataConfig(
-            repo_id="fold_shorts",
-            assets=AssetsConfig(
-                assets_dir="s3://openpi-assets/checkpoints/pi0_base/assets",
-                asset_id="trossen",
-            ),
-            default_prompt="fold the shorts",
-            repack_transforms=_transforms.Group(
-                inputs=[
-                    _transforms.RepackTransform(
-                        {
-                            "images": {
-                                "cam_high": "observation.images.front",
-                                "cam_left_wrist": "observation.images.left",
-                                "cam_right_wrist": "observation.images.right",
-                            },
-                            "state": "observation.state",
-                            "actions": "action",
-                        }
-                    ),
-                    _transforms.NormalizeGripperDims(
-                        gripper_indices=(6, 13),
-                        original_min=0.0,
-                        original_max=0.08,
-                        new_min=0.0,
-                        new_max=1.0,
-                        flip=True,
-                    ),
-                ]
-            ),
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
-        batch_size=128,
-        num_workers=80,
-        num_train_steps=30_000,
-    ),
-    TrainConfig(
-        name="pi05_aloha_fold_clothes",
-        model=pi0_config.Pi0Config(pi05=True),
-        data=LeRobotAlohaDataConfig(
-            repo_id="fold_clothes",
-            assets=AssetsConfig(
-                assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
-                asset_id="trossen",
-            ),
-            default_prompt="fold the shirt",
-            repack_transforms=_transforms.Group(
-                inputs=[
-                    _transforms.RepackTransform(
-                        {
-                            "images": {
-                                "cam_high": "observation.images.front",
-                                "cam_left_wrist": "observation.images.left",
-                                "cam_right_wrist": "observation.images.right",
-                            },
-                            "state": "observation.state",
-                            "actions": "action",
-                        }
-                    ),
-                    _transforms.NormalizeGripperDims(
-                        gripper_indices=(6, 13),
-                        original_min=0.0,
-                        original_max=0.08,
-                        new_min=0.0,
-                        new_max=1.0,
-                        flip=True,
-                    ),
-                ]
-            ),
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        num_workers=40,
-        num_train_steps=30_000,
-        batch_size=128,
-    ),
-    # ============================================= Multi-task Template ===========================================================
-    TrainConfig(
-        name="pi0_aloha_lora_pnp_multitask",
-        model=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
-        data=LeRobotAlohaDataConfig(
-            repo_id="pnp_multitask",
-            assets=AssetsConfig(
-                assets_dir="s3://openpi-assets/checkpoints/pi0_base/assets",
-                asset_id="trossen",
-            ),
-            repack_transforms=_transforms.Group(
-                inputs=[
-                    _transforms.RepackTransform(
-                        {
-                            "images": {
-                                "cam_high": "observation.images.front",
-                                "cam_left_wrist": "observation.images.left",
-                                "cam_right_wrist": "observation.images.right",
-                            },
-                            "state": "observation.state",
-                            "actions": "action",
-                            "prompt": "prompt",
-                        }
-                    ),
-                    _transforms.NormalizeGripperDims(
-                        gripper_indices=(6, 13),
-                        original_min=0.0,
-                        original_max=0.08,
-                        new_min=0.0,
-                        new_max=1.0,
-                        flip=True,
-                    ),
-                ]
-            ),
-            base_config=DataConfig(
-                prompt_from_task=True,
-            ),
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
-        batch_size=256,
-        num_workers=30,
-        num_train_steps=30_000,
-        freeze_filter=pi0_config.Pi0Config(
-            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
-        ).get_freeze_filter(),
-        ema_decay=None,
     ),
     #
     # Debugging configs.

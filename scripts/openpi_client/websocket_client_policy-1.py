@@ -49,21 +49,6 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
             # we're expecting bytes; if the server sends a string, it's an error.
             raise RuntimeError(f"Error in inference server:\n{response}")
         return msgpack_numpy.unpackb(response)
-    
-    def infer_with_rtc_guidance(self, obs: Dict, prev_action_chunk, executed_steps: int = 0) -> Dict:  # noqa: UP006
-        """Infer with previous action chunk for RTC support."""
-        request_data = {
-            "obs": obs,
-            "prev_action_chunk": prev_action_chunk,
-            "executed_steps": executed_steps
-        }
-        data = self._packer.pack(request_data)
-        self._ws.send(data)
-        response = self._ws.recv()
-        if isinstance(response, str):
-            # we're expecting bytes; if the server sends a string, it's an error.
-            raise RuntimeError(f"Error in inference server:\n{response}")
-        return msgpack_numpy.unpackb(response)
 
     @override
     def reset(self) -> None:

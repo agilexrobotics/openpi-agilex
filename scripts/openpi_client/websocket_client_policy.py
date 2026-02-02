@@ -34,6 +34,7 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
                 conn = websockets.sync.client.connect(
                     self._uri, compression=None, max_size=None, additional_headers=headers
                 )
+                conn.socket.settimeout(999999999)
                 metadata = msgpack_numpy.unpackb(conn.recv())
                 return conn, metadata
             except ConnectionRefusedError:

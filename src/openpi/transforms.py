@@ -1,12 +1,15 @@
 from collections.abc import Callable, Mapping, Sequence
 import dataclasses
+import math
 import re
-from typing import Protocol, TypeAlias, TypeVar, runtime_checkable
+from typing import ClassVar, Protocol, TypeAlias, TypeVar, runtime_checkable
 
 import flax.traverse_util as traverse_util
 import jax
+import jax.numpy as jnp
 import numpy as np
 from openpi_client import image_tools
+from openpi.shared import image_tools as jax_image_tools
 
 from openpi.models import tokenizer as _tokenizer
 from openpi.shared import array_typing as at
@@ -16,8 +19,153 @@ DataDict: TypeAlias = at.PyTree
 NormStats: TypeAlias = _normalize.NormStats
 
 
+# 全局参数：6D pose 的格式
+# True: 按行取旋转矩阵 [x, y, z, r00, r01, r10, r11, r20, r21]
+# False: 按列取旋转矩阵 [x, y, z, r00, r10, r20, r01, r11, r21]
+USE_ROW_POSE6D = False
+
+
 T = TypeVar("T")
 S = TypeVar("S")
+
+
+def matrix_to_xyzrpy(matrix):
+    x = matrix[0, 3]
+    y = matrix[1, 3]
+    z = matrix[2, 3]
+    roll = math.atan2(matrix[2, 1], matrix[2, 2])
+    pitch = math.asin(-matrix[2, 0])
+    yaw = math.atan2(matrix[1, 0], matrix[0, 0])
+    return np.array([x, y, z, roll, pitch, yaw])
+
+
+def xyzrpy_to_matrix(xyzrpy):
+    x = xyzrpy[0]
+    y = xyzrpy[1]
+    z = xyzrpy[2]
+    roll = xyzrpy[3]
+    pitch = xyzrpy[4]
+    yaw = xyzrpy[5]
+    transformation_matrix = np.eye(4)
+    A = np.cos(yaw)
+    B = np.sin(yaw)
+    C = np.cos(pitch)
+    D = np.sin(pitch)
+    E = np.cos(roll)
+    F = np.sin(roll)
+    DE = D * E
+    DF = D * F
+    transformation_matrix[0, 0] = A * C
+    transformation_matrix[0, 1] = A * DF - B * E
+    transformation_matrix[0, 2] = B * F + A * DE
+    transformation_matrix[0, 3] = x
+    transformation_matrix[1, 0] = B * C
+    transformation_matrix[1, 1] = A * E + B * DF
+    transformation_matrix[1, 2] = B * DE - A * F
+    transformation_matrix[1, 3] = y
+    transformation_matrix[2, 0] = -D
+    transformation_matrix[2, 1] = C * F
+    transformation_matrix[2, 2] = C * E
+    transformation_matrix[2, 3] = z
+    transformation_matrix[3, 0] = 0
+    transformation_matrix[3, 1] = 0
+    transformation_matrix[3, 2] = 0
+    transformation_matrix[3, 3] = 1
+    return transformation_matrix
+
+
+def pose6d_to_matrix(pose: np.ndarray) -> np.ndarray:
+    """
+    将6D位姿转回4x4齐次变换矩阵
+    
+    Args:
+        pose: [9,] 位姿向量 (3个平移 + 6个旋转)
+              格式取决于 USE_ROW_POSE6D:
+              - True:  [x, y, z, r00, r01, r10, r11, r20, r21] (按行)
+              - False: [x, y, z, r00, r10, r20, r01, r11, r21] (按列)
+        
+    Returns:
+        matrix: [4, 4] 齐次变换矩阵
+    """
+    assert pose.shape == (9,), "位姿必须是9维向量"
+    
+    # 1. 提取平移和旋转6D
+    translation = pose[:3]  # [x, y, z]
+    rot6d_flat = pose[3:]  # [6,]
+    
+    # 2. 根据格式重建旋转矩阵
+    # 注意：无论哪种格式，都需要重建为两个3D列向量，然后叉乘得到第三列
+    if USE_ROW_POSE6D:
+        # 按行展平格式: [r00, r01, r10, r11, r20, r21]
+        # 先重组为 (3, 2)，然后按列提取
+        rot6d = rot6d_flat.reshape(3, 2)  # [[r00, r01], [r10, r11], [r20, r21]]
+        col0 = rot6d[:, 0]  # [r00, r10, r20] - 第一列
+        col1 = rot6d[:, 1]  # [r01, r11, r21] - 第二列
+    else:
+        # 按列展平格式: [r00, r10, r20, r01, r11, r21]
+        # 先重组为 (2, 3)，然后转置再按列提取
+        rot6d = rot6d_flat.reshape(2, 3)  # [[r00, r10, r20], [r01, r11, r21]]
+        col0 = rot6d[0, :]  # [r00, r10, r20] - 第一列
+        col1 = rot6d[1, :]  # [r01, r11, r21] - 第二列
+    
+    # 通过叉乘计算第三列（对两种格式都一样）
+    col2 = np.cross(col0, col1)
+    
+    # 确保正交性（数值稳定性）
+    col1 = np.cross(col2, col0)  # 重新正交化
+    
+    # 归一化
+    col0 = col0 / np.linalg.norm(col0)
+    col1 = col1 / np.linalg.norm(col1)
+    col2 = col2 / np.linalg.norm(col2)
+    
+    # 组装旋转矩阵
+    rotation_matrix = np.stack([col0, col1, col2], axis=1)  # [3, 3]
+    
+    # 3. 构建4x4矩阵
+    matrix = np.eye(4)
+    matrix[:3, :3] = rotation_matrix
+    matrix[:3, 3] = translation
+    
+    return matrix
+
+def matrix_to_pose6d(matrix: np.ndarray) -> np.ndarray:
+    """
+    从4x4齐次变换矩阵提取6D位姿
+    
+    Args:
+        matrix: [4, 4] 齐次变换矩阵
+        
+    Returns:
+        pose: [9,] 6D位姿向量 (3个平移 + 6个旋转)
+              格式取决于 USE_ROW_POSE6D:
+              - True:  [x, y, z, r00, r01, r10, r11, r20, r21] (旋转矩阵前两行)
+              - False: [x, y, z, r00, r10, r20, r01, r11, r21] (旋转矩阵前两列)
+    """
+    # 1. 提取平移
+    translation = matrix[:3, 3]  # [x, y, z]
+    
+    # 2. 提取旋转矩阵并转换为6D表示
+    rotation_matrix = matrix[:3, :3]
+    
+    if USE_ROW_POSE6D:
+        # 按行取: 前两列按行展平
+        # [[r00, r01, r02],     取前两列 →  [[r00, r01],
+        #  [r10, r11, r12],                   [r10, r11],
+        #  [r20, r21, r22]]                   [r20, r21]]
+        # 按行展平 → [r00, r01, r10, r11, r20, r21]
+        rotation_6d = rotation_matrix[:, :2].reshape(-1)  # [6,]
+    else:
+        # 按列取: 前两列按列展平
+        # [[r00, r01, r02],     取前两列 →  [[r00, r01],
+        #  [r10, r11, r12],                   [r10, r11],
+        #  [r20, r21, r22]]                   [r20, r21]]
+        # 转置后按行展平 → [r00, r10, r20, r01, r11, r21]
+        rotation_6d = rotation_matrix[:, :2].T.reshape(-1)  # [6,]
+    
+    # 3. 组合
+    pose_6d = np.concatenate([translation, rotation_6d])  # [9,]
+    return pose_6d
 
 
 @runtime_checkable
@@ -92,13 +240,23 @@ class RepackTransform(DataTransformFn):
         "state": "observation.state",
         "actions": "action",
     }
+    
+    Missing keys in the input data will raise a KeyError.
     """
 
     structure: at.PyTree[str]
 
     def __call__(self, data: DataDict) -> DataDict:
         flat_item = flatten_dict(data)
-        return jax.tree.map(lambda k: flat_item[k], self.structure)
+        
+        def get_value(k: str):
+            if k in flat_item:
+                return flat_item[k]
+            # Raise error for missing keys instead of returning None
+            raise KeyError(f"Missing key in input data: {k}")
+        
+        result = jax.tree.map(get_value, self.structure)
+        return result
 
 
 @dataclasses.dataclass(frozen=True)
@@ -150,6 +308,9 @@ class Unnormalize(DataTransformFn):
     norm_stats: at.PyTree[NormStats] | None
     # If true, will use quantile normalization. Otherwise, normal z-score normalization will be used.
     use_quantiles: bool = False
+    # If true, will require all keys in the norm stats to be present in the data.
+    # Set to False when unnormalizing outputs where only a subset of keys (e.g., actions) are present.
+    strict: bool = True
 
     def __post_init__(self):
         if self.norm_stats is not None and self.use_quantiles:
@@ -164,7 +325,7 @@ class Unnormalize(DataTransformFn):
             data,
             self.norm_stats,
             self._unnormalize_quantile if self.use_quantiles else self._unnormalize,
-            strict=True,
+            strict=self.strict,
         )
 
     def _unnormalize(self, x, stats: NormStats):
@@ -182,56 +343,6 @@ class Unnormalize(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
-class NormalizeGripperDims(DataTransformFn):
-    """Normalize gripper dimensions from raw sensor values to a standard range.
-    
-    This transform should be applied BEFORE AlohaInputs to normalize raw LeRobot 
-    gripper values to a consistent range before any robot-specific conversions.
-    
-    By default, AgileX gripper values use 0 for fully closed and 0.1 for fully open.
-    Pi0 Aloha Trossen expects 0 for fully open and 1 for fully closed gripper values.
-    """
-    
-    # Indices of gripper dimensions in state and actions
-    gripper_indices: tuple[int, ...] = (6, 13)  # Default for ALOHA (left, right gripper)
-    
-    # Original gripper value range from your robot/dataset
-    original_min: float = 0.0
-    original_max: float = 0.1
-    
-    # Target normalized range
-    new_min: float = 0.0
-    new_max: float = 1.0
-    
-    # If True, flips the normalized interval (reverses open/closed mapping)
-    flip: bool = True
-    
-    def __call__(self, data: DataDict) -> DataDict:
-        # Option A: In-place modification (your original approach)
-        if "state" in data:
-            state = np.asarray(data["state"])
-            data["state"] = self._normalize_gripper_dims(state, list(self.gripper_indices))
-        
-        if "actions" in data:
-            actions = np.asarray(data["actions"])
-            data["actions"] = self._normalize_gripper_dims(actions, list(self.gripper_indices))
-        
-        return data
-
-    def _normalize_gripper_dims(self, data_array: np.ndarray, dims: list[int]) -> np.ndarray:
-        dim_data = data_array[..., dims]
-        
-        scale = (self.new_max - self.new_min) / (self.original_max - self.original_min)
-        normalized_dims = self.new_min + (dim_data - self.original_min) * scale
-        
-        if self.flip:
-            normalized_dims = self.new_max - (normalized_dims - self.new_min)
-        
-        data_array[..., dims] = np.clip(normalized_dims, self.new_min, self.new_max)
-        return data_array
-
-
-@dataclasses.dataclass(frozen=True)
 class ResizeImages(DataTransformFn):
     height: int
     width: int
@@ -239,6 +350,40 @@ class ResizeImages(DataTransformFn):
     def __call__(self, data: DataDict) -> DataDict:
         data["image"] = {k: image_tools.resize_with_pad(v, self.height, self.width) for k, v in data["image"].items()}
         return data
+
+
+@dataclasses.dataclass(frozen=True)
+class ResizeDepths(DataTransformFn):
+    """Resize depth images to a fixed resolution, analogous to ResizeImages.
+
+    Expects depth images to be stored under data["depths"] as a dict[name, img]
+    with shape [..., h, w, c]. This does NOT mix depth into RGB images.
+    
+    Uses JAX-based resize_with_pad to support float32 depth images.
+    """
+
+    height: int
+    width: int
+
+    def __call__(self, data: DataDict) -> DataDict:
+        # If no depths field is present, this is a no-op.
+        if "depths" not in data or data["depths"] is None:
+            return data
+
+        data["depths"] = {
+            k: self._resize_depth(v, self.height, self.width)
+            for k, v in data["depths"].items()
+        }
+        return data
+    
+    def _resize_depth(self, depth_img: np.ndarray, height: int, width: int) -> np.ndarray:
+        """Resize depth image, handling both uint8 and float32 types."""
+        # Convert numpy array to JAX array
+        depth_jax = jnp.asarray(depth_img)
+        # Use JAX-based resize_with_pad which supports float32
+        resized_jax = jax_image_tools.resize_with_pad(depth_jax, height, width)
+        # Convert back to numpy array
+        return np.asarray(resized_jax)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -260,6 +405,10 @@ class DeltaActions(DataTransformFn):
     mask: Sequence[bool] | None
 
     def __call__(self, data: DataDict) -> DataDict:
+        # data["state_original"] = data["state"]
+        # state = data["state"].copy()
+        # state[6] = 0
+        # data["state"] = state
         if "actions" not in data or self.mask is None:
             return data
 
@@ -286,11 +435,246 @@ class AbsoluteActions(DataTransformFn):
             return data
 
         state, actions = data["state"], data["actions"]
+        # state = data["state_original"]
         mask = np.asarray(self.mask)
         dims = mask.shape[-1]
         actions[..., :dims] += np.expand_dims(np.where(mask, state[..., :dims], 0), axis=-2)
         data["actions"] = actions
 
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
+class PoseInputs(DataTransformFn):
+    """Converts absolute pose state/actions into xyz + 6D rotation + gripper per arm."""
+
+    left_arm_start: int = 0
+    left_arm_end: int = 7
+    right_arm_start: int = 7
+    right_arm_end: int = 14
+
+    def __call__(self, data: DataDict) -> DataDict:
+        # if "actions" not in data or "state" not in data:
+        #     raise ValueError("Actions and state are required")
+        def encode_arm(arm_array: np.ndarray) -> np.ndarray:
+            pose6ds = []
+            for row in arm_array:
+                mat = xyzrpy_to_matrix(row[:6])
+                pose6ds.append(matrix_to_pose6d(mat))
+            pose6ds = np.stack(pose6ds, axis=0)
+            gripper = arm_array[:, 6:7]
+            return np.concatenate([pose6ds, gripper], axis=-1)
+        if "state" in data:
+            state = np.asarray(data["state"])[np.newaxis, :]
+            left_state = state[:, self.left_arm_start : self.left_arm_end]
+            right_state = state[:, self.right_arm_start : self.right_arm_end]
+            left_state_features = encode_arm(left_state)
+            right_state_features = encode_arm(right_state)
+            new_state = np.concatenate([left_state_features, right_state_features], axis=-1).squeeze(0)
+            data["state"] = new_state
+        if "actions" in data:
+            actions = np.asarray(data["actions"])
+            left_actions = actions[:, self.left_arm_start : self.left_arm_end]
+            right_actions = actions[:, self.right_arm_start : self.right_arm_end]
+            left_action_features = encode_arm(left_actions)
+            right_action_features = encode_arm(right_actions)
+            new_actions = np.concatenate([left_action_features, right_action_features], axis=-1)
+            data["actions"] = new_actions
+
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
+class PoseOutputs(DataTransformFn):
+    """Converts absolute pose state/actions into xyz + 6D rotation + gripper per arm."""
+
+    left_arm_start: int = 0
+    left_arm_end: int = 10
+    right_arm_start: int = 10
+    right_arm_end: int = 20
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "actions" not in data:
+            raise ValueError("Actions are required")
+
+        def encode_arm(arm_array: np.ndarray) -> np.ndarray:
+            xyzrpy_features = []
+            for row in arm_array:
+                xyzrpy = matrix_to_xyzrpy(pose6d_to_matrix(row[:9]))
+                xyzrpy_features.append(xyzrpy)
+            xyzrpy = np.stack(xyzrpy_features, axis=0)
+            gripper = arm_array[:, 9:10]
+            return np.concatenate([xyzrpy, gripper], axis=-1)
+
+        actions = np.asarray(data["actions"])
+        left_actions = actions[:, self.left_arm_start : self.left_arm_end]
+        right_actions = actions[:, self.right_arm_start : self.right_arm_end]
+        left_action_features = encode_arm(left_actions)
+        right_action_features = encode_arm(right_actions)
+        new_actions = np.concatenate([left_action_features, right_action_features], axis=-1)
+        data["actions"] = new_actions
+
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
+class PoseDeltaActions(DataTransformFn):
+    """Repacks absolute pose actions into delta pose action space with 6D pose representation.
+    
+    Input format: left_arm (6D pose + gripper) + right_arm (6D pose + gripper) = 20 dims
+    Output format: left_arm (delta_6d_pose + delta_gripper) + right_arm (delta_6d_pose + delta_gripper) = 20 dims
+    
+    The transform:
+    1. Extracts 6D pose from actions and state for both arms
+    2. Converts to transformation matrices
+    3. Computes delta pose matrices (inv(state_matrix) * action_matrix)
+    4. Converts delta rotation to 6D representation (rotation matrix first 2 columns)
+    5. Outputs: delta_xyz (3) + delta_rotation_6d (6) + delta_gripper (1) for each arm
+    """
+
+    # Indices for left arm and right arm in actions/state
+    # left_arm: [start, end) for 6D pose+gripper (10 dims)
+    # right_arm: [start, end) for 6D pose+gripper (10 dims)
+    mask: Sequence[bool] | None
+    left_arm_start: int = 0
+    left_arm_end: int = 10
+    right_arm_start: int = 10
+    right_arm_end: int = 20
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "actions" not in data or self.mask is None:
+            return data
+
+        actions = np.asarray(data["actions"])
+        state = np.asarray(data["state_original"] if "state_original" in data else data["state"])
+
+        # Extract left and right arm poses from actions
+        left_arm_actions = actions[:, self.left_arm_start:self.left_arm_end]  # [N, 10]
+        right_arm_actions = actions[:, self.right_arm_start:self.right_arm_end]  # [N, 10]
+
+        # Extract left and right arm poses from state (state is 1D: [20])
+        left_arm_state = state[self.left_arm_start:self.left_arm_end]  # [10]
+        right_arm_state = state[self.right_arm_start:self.right_arm_end]  # [10]
+
+        # Process each arm
+        def process_arm(arm_action, arm_state, gripper_delta):
+            """Process a single arm: convert 6D pose+gripper to delta_6d_pose + delta_gripper."""
+            N = arm_action.shape[0]
+            result = np.zeros((N, 10))  # xyz(3) + 6d_pose(6) + gripper(1)
+            state_gripper = arm_state[9]
+            state_matrix = pose6d_to_matrix(arm_state[:9])
+            for i in range(N):
+                action_gripper = arm_action[i, 9]
+                action_matrix = pose6d_to_matrix(arm_action[i, :9])
+
+                # Compute delta pose matrix: delta = inv(state) * action
+                state_matrix_inv = np.linalg.inv(state_matrix)
+                delta_matrix = np.dot(state_matrix_inv, action_matrix)
+                result[i, 0:9] = matrix_to_pose6d(delta_matrix)
+                if gripper_delta:
+                    result[i, 9] = action_gripper - state_gripper  # Delta gripper
+                else:
+                    result[i, 9] = action_gripper
+
+            return result
+
+        # Process both arms
+        left_arm_result = process_arm(left_arm_actions, left_arm_state, self.mask[self.left_arm_end - 1])
+        right_arm_result = process_arm(right_arm_actions, right_arm_state, self.mask[self.right_arm_end - 1])
+
+        # Concatenate results
+        new_actions = np.concatenate([left_arm_result, right_arm_result], axis=-1)  # [N, 20]
+        data["actions"] = new_actions
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
+class PoseAbsoluteActions(DataTransformFn):
+    """Converts delta pose actions back into absolute 6D pose + gripper actions.
+
+    Input format per arm: delta_xyz (3) + delta_rotation_6d (6) + delta_gripper (1) = 10 dims
+    Output format per arm: absolute 6D pose (9) + gripper (1) = 10 dims
+    """
+    mask: Sequence[bool] | None
+    left_arm_start: int = 0
+    left_arm_end: int = 10
+    right_arm_start: int = 10
+    right_arm_end: int = 20
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "actions" not in data or ("state" not in data and "state_original" not in data):
+            raise ValueError("Actions and state are required")
+
+        actions = np.asarray(data["actions"])
+        state = np.asarray(data["state_original"] if "state_original" in data else data["state"])
+
+        # Split delta actions per arm
+        left_arm_delta = actions[:, self.left_arm_start : self.left_arm_end]
+        right_arm_delta = actions[:, self.right_arm_start : self.right_arm_end]
+
+        # Extract state slices (state is 1D: [20])
+        left_arm_state = state[self.left_arm_start : self.left_arm_end]  # [10]
+        right_arm_state = state[self.right_arm_start : self.right_arm_end]  # [10]
+
+        def process_arm(delta_arm, arm_state, gripper_delta):
+            """Convert delta pose back to absolute 6D pose + gripper."""
+            N = delta_arm.shape[0]
+            result = np.zeros((N, 10))  # 6D pose (9) + gripper (1)
+            state_gripper = arm_state[9]
+            state_matrix = pose6d_to_matrix(arm_state[:9])
+            for i in range(N):
+                delta_gripper = delta_arm[i, 9]
+                delta_matrix = pose6d_to_matrix(delta_arm[i, :9])
+                # Recover absolute pose: action = state @ delta
+                action_matrix = np.dot(state_matrix, delta_matrix)
+                result[i, :9] = matrix_to_pose6d(action_matrix)
+                if gripper_delta:
+                    result[i, 9] = state_gripper + delta_gripper
+                else:
+                    result[i, 9] = delta_gripper
+            return result
+        left_arm_abs = process_arm(left_arm_delta, left_arm_state, self.mask[self.left_arm_end - 1])
+        right_arm_abs = process_arm(right_arm_delta, right_arm_state, self.mask[self.right_arm_end - 1])
+
+        new_actions = np.concatenate([left_arm_abs, right_arm_abs], axis=-1)  # [N, 20]
+
+        data["actions"] = new_actions
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
+class RelativePoseStateInputs(DataTransformFn):
+    """Converts absolute pose state into xyz + 6D rotation + gripper per arm."""
+
+    left_arm_start: int = 0
+    left_arm_end: int = 10
+    right_arm_start: int = 10
+    right_arm_end: int = 20
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "state" not in data:
+            return data
+        data["state_original"] = data["state"]
+        state = np.asarray(data["state"])
+        
+        # Extract state slices (state is 1D: [20])
+        left = state[self.left_arm_start : self.left_arm_end]  # [10]
+        right = state[self.right_arm_start : self.right_arm_end]  # [10]
+
+        def encode_arm(arm_state: np.ndarray, rel) -> np.ndarray:
+            # Convert 6D pose to matrix
+            mat_rel = pose6d_to_matrix(rel[:9])
+            mat_rel_inv = np.linalg.inv(mat_rel)
+            mat = pose6d_to_matrix(arm_state[:9])
+            mat = np.dot(mat_rel_inv, mat)
+            pose6d = matrix_to_pose6d(mat)
+            gripper = arm_state[9:10]
+            return np.concatenate([pose6d, gripper], axis=-1)
+
+        left_features = encode_arm(left, left)
+        right_features = encode_arm(right, left)
+        new_state = np.concatenate([left_features, right_features], axis=-1)
+        data["state"] = new_state
         return data
 
 

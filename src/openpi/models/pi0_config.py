@@ -31,6 +31,28 @@ class Pi0Config(_model.BaseModelConfig):
     pi05: bool = False
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
+    
+    # Depth encoder support
+    use_depth_encoder: bool = False  # Whether to use depth encoder for processing depth images
+    depth_image_keys: tuple[str, ...] = ()  # (Optional) Specific depth keys to process. If empty, uses all depths from obs.depths
+    depth_encoder_depth: int = 12  # Number of transformer encoder layers in depth encoder (default 12, SigLIP uses 27)
+    depth_encoder_num_heads: int = 12  # Number of attention heads in depth encoder
+    depth_encoder_mlp_dim: int | None = None  # MLP dimension in depth encoder (default: 4 * output_dim)
+    depth_encoder_dropout: float = 0.0  # Dropout rate in depth encoder
+    
+    # Tactile encoder support
+    use_tactile_encoder: bool = False  # Whether to use tactile encoder for processing tactile force data
+    tactile_input_shape: tuple[int, int] = (50, 32)  # Spatial shape of tactile input (height, width)
+    tactile_force_dim: int = 6  # Force dimension per sensor (e.g., 6 for 6D force)
+    tactile_output_dim: int = 64  # Output feature dimension from tactile encoder
+    tactile_num_layers: int = 6  # Number of CNN layers in tactile encoder
+    tactile_adaptive_pool: bool = False  # Use adaptive pooling to unify token count
+    tactile_target_tokens: int | None = None  # Target token count (only when adaptive_pool=True)
+
+    # Force6D encoder support
+    use_force6d_encoder: bool = False  # Whether to use MLP encoder for processing force6d vectors
+    force6d_hidden_dim: int = 32  # Hidden dimension in Force6DEncoder MLP
+    force6d_num_layers: int = 2  # Number of MLP layers in Force6DEncoder
 
     def __post_init__(self):
         if self.max_token_len is None:
